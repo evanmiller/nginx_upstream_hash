@@ -26,15 +26,9 @@ typedef struct {
     ngx_http_upstream_hash_peer_t     peer[0];
 } ngx_http_upstream_hash_peers_t;
 
-/* The size of "hash" depends on the architecture (32-bit or 64-bit) to
- * preserve bug-compatibility with PECL Memcache. Note that since the hash
- * function produces 15-bit numbers, and the hashes are added up upon retry,
- * achieving an overflow on a 32-bit machine requires ~100K retries. So in
- * practice the architecture difference does not matter.
- */
 typedef struct {
     ngx_http_upstream_hash_peers_t   *peers;
-    ngx_uint_t                        hash;
+    uint32_t                          hash;
     ngx_str_t                         current_key;
     ngx_str_t                         original_key;
     ngx_uint_t                        try_i;
