@@ -1,13 +1,15 @@
 diff -Naur src/http/ngx_http_upstream.h src-hash/http/ngx_http_upstream.h
 --- src/http/ngx_http_upstream.h	2009-09-07 04:49:51.000000000 -0500
 +++ src-hash/http/ngx_http_upstream.h	2009-10-19 08:27:40.000000000 -0500
-@@ -105,6 +105,10 @@
+@@ -105,6 +105,12 @@
  
      ngx_array_t                     *servers;  /* ngx_http_upstream_server_t */
  
++#if (NGX_HTTP_UPSTREAM_HASH) 
 +    ngx_array_t                     *values;
 +    ngx_array_t                     *lengths;
 +    ngx_uint_t                       retries;
++#endif
 +
      ngx_uint_t                       flags;
      ngx_str_t                        host;

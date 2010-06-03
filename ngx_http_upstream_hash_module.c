@@ -1,6 +1,6 @@
 /*
  * Hash a variable to choose an upstream server.
- * 
+ *
  * Copyright (C) Evan Miller
  *
  * This module can be distributed under the same terms as Nginx itself.
@@ -11,13 +11,14 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#define ngx_bitvector_index(index) index / (8 * sizeof(uintptr_t))
-#define ngx_bitvector_bit(index) (uintptr_t) 1 << index % (8 * sizeof(uintptr_t))
+#define ngx_bitvector_index(index) (index / (8 * sizeof(uintptr_t)))
+#define ngx_bitvector_bit(index) ((uintptr_t) 1 << (index % (8 * sizeof(uintptr_t))))
 
 typedef struct {
     struct sockaddr                *sockaddr;
     socklen_t                       socklen;
     ngx_str_t                       name;
+    unsigned                        down:1;
 } ngx_http_upstream_hash_peer_t;
 
 typedef struct {
@@ -25,6 +26,12 @@ typedef struct {
     ngx_http_upstream_hash_peer_t     peer[0];
 } ngx_http_upstream_hash_peers_t;
 
+/* The size of "hash" depends on the architecture (32-bit or 64-bit) to
+ * preserve bug-compatibility with PECL Memcache. Note that since the hash
+ * function produces 15-bit numbers, and the hashes are added up upon retry,
+ * achieving an overflow on a 32-bit machine requires ~100K retries. So in
+ * practice the architecture difference does not matter.
+ */
 typedef struct {
     ngx_http_upstream_hash_peers_t   *peers;
     ngx_uint_t                        hash;
@@ -35,6 +42,8 @@ typedef struct {
 } ngx_http_upstream_hash_peer_data_t;
 
 
+static void ngx_http_upstream_hash_next_peer(ngx_http_upstream_hash_peer_data_t *uhpd,
+        ngx_uint_t *tries, ngx_log_t *log);
 static ngx_int_t ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
     ngx_http_upstream_srv_conf_t *us);
 static ngx_int_t ngx_http_upstream_get_hash_peer(ngx_peer_connection_t *pc,
@@ -43,9 +52,9 @@ static void ngx_http_upstream_free_hash_peer(ngx_peer_connection_t *pc,
     void *data, ngx_uint_t state);
 static char *ngx_http_upstream_hash(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
-static char *ngx_http_upstream_hash_again(ngx_conf_t *cf, ngx_command_t *cmd, 
+static char *ngx_http_upstream_hash_again(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
-static ngx_int_t ngx_http_upstream_init_hash(ngx_conf_t *cf, 
+static ngx_int_t ngx_http_upstream_init_hash(ngx_conf_t *cf,
     ngx_http_upstream_srv_conf_t *us);
 static ngx_uint_t ngx_http_upstream_hash_crc32(u_char *keydata, size_t keylen);
 
@@ -135,6 +144,7 @@ ngx_http_upstream_init_hash(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
             peers->peer[n].sockaddr = server[i].addrs[j].sockaddr;
             peers->peer[n].socklen = server[i].addrs[j].socklen;
             peers->peer[n].name = server[i].addrs[j].name;
+            peers->peer[n].down = server[i].down;
         }
     }
 
@@ -149,7 +159,7 @@ ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
     ngx_http_upstream_srv_conf_t *us)
 {
     ngx_http_upstream_hash_peer_data_t     *uhpd;
-    
+
     ngx_str_t val;
 
     if (ngx_http_script_run(r, &val, us->lengths, 0, us->values) == NULL) {
@@ -157,8 +167,8 @@ ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
     }
 
     uhpd = ngx_pcalloc(r->pool, sizeof(ngx_http_upstream_hash_peer_data_t)
-            + sizeof(uintptr_t) * 
-                ((ngx_http_upstream_hash_peers_t *)us->peer.data)->number / 
+            + sizeof(uintptr_t) *
+                ((ngx_http_upstream_hash_peers_t *)us->peer.data)->number /
                     (8 * sizeof(uintptr_t)));
     if (uhpd == NULL) {
         return NGX_ERROR;
@@ -180,11 +190,17 @@ ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
     ngx_memcpy(uhpd->current_key.data, val.data, val.len);
     uhpd->current_key.len = val.len;
     uhpd->original_key = val;
+    uhpd->hash = ngx_http_upstream_hash_crc32(uhpd->current_key.data, uhpd->current_key.len);
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+            "upstream_hash: hashed \"%V\" to %ui", &uhpd->current_key, uhpd->hash % uhpd->peers->number);
+    uhpd->try_i = 0;
+
+    /* In case this one is marked down */
+    ngx_http_upstream_hash_next_peer(uhpd, &r->upstream->peer.tries, r->connection->log);
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                   "upstream_hash: hashing \"%V\"", &val);
+            "upstream_hash: Starting with %ui", uhpd->hash % uhpd->peers->number);
 
-    uhpd->hash = ngx_http_upstream_hash_crc32(val.data, val.len);
 
     return NGX_OK;
 }
@@ -207,8 +223,9 @@ ngx_http_upstream_get_hash_peer(ngx_peer_connection_t *pc, void *data)
 
     peer = &uhpd->peers->peer[peer_index];
 
-    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                   "upstream_hash: chose peer %ui w/ hash %ui", peer_index, uhpd->hash);
+
+    ngx_log_debug3(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                   "upstream_hash: chose peer %ui w/ hash %ui for tries %ui", peer_index, uhpd->hash, pc->tries);
 
     pc->sockaddr = peer->sockaddr;
     pc->socklen = peer->socklen;
@@ -225,27 +242,40 @@ ngx_http_upstream_free_hash_peer(ngx_peer_connection_t *pc, void *data,
     ngx_http_upstream_hash_peer_data_t  *uhpd = data;
     ngx_uint_t                           current;
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pc->log, 0, 
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pc->log, 0,
             "upstream_hash: free upstream hash peer try %ui", pc->tries);
 
     if (state & (NGX_PEER_FAILED|NGX_PEER_NEXT)
-            && --pc->tries)
-    {
+            && pc->tries) {
         current = uhpd->hash % uhpd->peers->number;
 
         uhpd->tried[ngx_bitvector_index(current)] |= ngx_bitvector_bit(current);
-
-        do {
-            uhpd->current_key.len = ngx_sprintf(uhpd->current_key.data, "%d%V", 
-                    ++uhpd->try_i, &uhpd->original_key) - uhpd->current_key.data;
-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                    "upstream_hash: hashing \"%V\"", &uhpd->current_key);
-            uhpd->hash += ngx_http_upstream_hash_crc32(uhpd->current_key.data,
-                    uhpd->current_key.len);
-            current = uhpd->hash % uhpd->peers->number;
-        } while ((uhpd->tried[ngx_bitvector_index(current)] & ngx_bitvector_bit(current)) 
-                && --pc->tries);
+        ngx_http_upstream_hash_next_peer(uhpd, &pc->tries, pc->log);
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+          "upstream_hash: Using %ui because %ui failed", uhpd->hash % uhpd->peers->number, current);
+    } else {
+        pc->tries = 0;
     }
+}
+
+static void ngx_http_upstream_hash_next_peer(ngx_http_upstream_hash_peer_data_t *uhpd,
+        ngx_uint_t *tries, ngx_log_t *log) {
+
+    ngx_uint_t current;
+    current = uhpd->hash % uhpd->peers->number;
+    //  Loop while there is a try left, we're on one we haven't tried, and
+    // the current peer isn't marked down
+    while ((*tries)-- && (
+       (uhpd->tried[ngx_bitvector_index(current)] & ngx_bitvector_bit(current))
+        || uhpd->peers->peer[current].down)) {
+       uhpd->current_key.len = ngx_sprintf(uhpd->current_key.data, "%d%V",
+           ++uhpd->try_i, &uhpd->original_key) - uhpd->current_key.data;
+       uhpd->hash += ngx_http_upstream_hash_crc32(uhpd->current_key.data,
+           uhpd->current_key.len);
+       current = uhpd->hash % uhpd->peers->number;
+       ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
+           "upstream_hash: hashed \"%V\" to %ui", &uhpd->current_key, current);
+   } 
 }
 
 /* bit-shift, bit-mask, and non-zero requirement are for libmemcache compatibility */
@@ -286,7 +316,7 @@ ngx_http_upstream_hash(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     uscf->peer.init_upstream = ngx_http_upstream_init_hash;
 
-    uscf->flags = NGX_HTTP_UPSTREAM_CREATE;
+    uscf->flags = NGX_HTTP_UPSTREAM_CREATE | NGX_HTTP_UPSTREAM_DOWN;
 
     uscf->values = vars_values->elts;
     uscf->lengths = vars_lengths->elts;

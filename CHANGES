@@ -1,3 +1,8 @@
+Changes with upstream_hash 0.3.2                                 03 Jun 2010
+
+    *) Support for servers marked as down. Thanks to Jack Lindamood of Facebook.
+
+
 Changes with upstream_hash 0.3.1                                 19 Oct 2009
 
     *) Update nginx.patch to work with more recent versions of nginx
