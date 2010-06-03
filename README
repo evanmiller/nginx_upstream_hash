@@ -16,6 +16,8 @@ Usage:
         hash_again  10;          # default 0
     }
 
+Works the same on 32-bit and 64-bit systems.
+
 See http://wiki.nginx.org/NginxHttpUpstreamRequestHashModule for more details.
 
 Questions/patches to Evan Miller, emmiller@gmail.com.
