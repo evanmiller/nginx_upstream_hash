@@ -18,7 +18,10 @@ typedef struct {
     struct sockaddr                *sockaddr;
     socklen_t                       socklen;
     ngx_str_t                       name;
-    unsigned                        down:1;
+    ngx_uint_t                      down;
+#if (NGX_HTTP_SSL)
+    ngx_ssl_session_t              *ssl_session;   /* local to a process */
+#endif
 } ngx_http_upstream_hash_peer_t;
 
 typedef struct {
@@ -44,6 +47,12 @@ static ngx_int_t ngx_http_upstream_get_hash_peer(ngx_peer_connection_t *pc,
     void *data);
 static void ngx_http_upstream_free_hash_peer(ngx_peer_connection_t *pc,
     void *data, ngx_uint_t state);
+#if (NGX_HTTP_SSL)
+static ngx_int_t ngx_http_upstream_set_hash_peer_session(ngx_peer_connection_t *pc,
+    void *data);
+static void ngx_http_upstream_save_hash_peer_session(ngx_peer_connection_t *pc,
+    void *data);
+#endif
 static char *ngx_http_upstream_hash(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_upstream_hash_again(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -175,6 +184,10 @@ ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
     r->upstream->peer.free = ngx_http_upstream_free_hash_peer;
     r->upstream->peer.get = ngx_http_upstream_get_hash_peer;
     r->upstream->peer.tries = us->retries + 1;
+#if (NGX_HTTP_SSL)
+    r->upstream->peer.set_session = ngx_http_upstream_set_hash_peer_session;
+    r->upstream->peer.save_session = ngx_http_upstream_save_hash_peer_session;
+#endif
 
     /* must be big enough for the retry keys */
     if ((uhpd->current_key.data = ngx_pcalloc(r->pool, NGX_ATOMIC_T_LEN + val.len)) == NULL) {
@@ -251,6 +264,77 @@ ngx_http_upstream_free_hash_peer(ngx_peer_connection_t *pc, void *data,
         pc->tries = 0;
     }
 }
+
+#if (NGX_HTTP_SSL)
+static ngx_int_t
+ngx_http_upstream_set_hash_peer_session(ngx_peer_connection_t *pc, void *data) {
+    ngx_http_upstream_hash_peer_data_t  *uhpd = data;
+
+    ngx_int_t                       rc;
+    ngx_ssl_session_t              *ssl_session;
+    ngx_http_upstream_hash_peer_t  *peer;
+    ngx_uint_t                           current;
+
+    current = uhpd->hash % uhpd->peers->number;
+
+    peer = &uhpd->peers->peer[current];
+
+    /* TODO: threads only mutex */
+    /* ngx_lock_mutex(rrp->peers->mutex); */
+
+    ssl_session = peer->ssl_session;
+
+    rc = ngx_ssl_set_session(pc->connection, ssl_session);
+
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                   "set session: %p:%d",
+                   ssl_session, ssl_session ? ssl_session->references : 0);
+
+    /* ngx_unlock_mutex(rrp->peers->mutex); */
+
+    return rc;
+}
+
+static void
+ngx_http_upstream_save_hash_peer_session(ngx_peer_connection_t *pc, void *data) {
+    ngx_http_upstream_hash_peer_data_t *uhpd = data;
+    ngx_ssl_session_t            *old_ssl_session, *ssl_session;
+    ngx_http_upstream_hash_peer_t  *peer;
+    ngx_uint_t                           current;
+
+    ssl_session = ngx_ssl_get_session(pc->connection);
+
+    if (ssl_session == NULL) {
+        return;
+    }
+
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                   "save session: %p:%d", ssl_session, ssl_session->references);
+
+    current = uhpd->hash % uhpd->peers->number;
+
+    peer = &uhpd->peers->peer[current];
+
+    /* TODO: threads only mutex */
+    /* ngx_lock_mutex(rrp->peers->mutex); */
+
+    old_ssl_session = peer->ssl_session;
+    peer->ssl_session = ssl_session;
+
+    /* ngx_unlock_mutex(rrp->peers->mutex); */
+
+    if (old_ssl_session) {
+
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                       "old session: %p:%d",
+                       old_ssl_session, old_ssl_session->references);
+
+        /* TODO: may block */
+
+        ngx_ssl_free_session(old_ssl_session);
+    }
+}
+#endif
 
 static void ngx_http_upstream_hash_next_peer(ngx_http_upstream_hash_peer_data_t *uhpd,
         ngx_uint_t *tries, ngx_log_t *log) {
