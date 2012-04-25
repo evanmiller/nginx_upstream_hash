@@ -130,14 +130,21 @@ ngx_http_upstream_init_hash(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     us->peer.init = ngx_http_upstream_init_hash_peer;
 
     if (!us->servers) {
-
         return NGX_ERROR;
     }
 
     server = us->servers->elts;
 
-    for (n = 0, i = 0; i < us->servers->nelts; i++) {
+    n = 0;
+    for (i = 0; i < us->servers->nelts; i++) {
+        if (server[i].backup)
+            continue;
+
         n += server[i].naddrs;
+    }
+
+    if (n == 0) {
+        return NGX_ERROR;
     }
 
     peers = ngx_pcalloc(cf->pool, sizeof(ngx_http_upstream_hash_peers_t)
@@ -149,9 +156,10 @@ ngx_http_upstream_init_hash(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
 
     peers->number = n;
 
+    n = 0;
     /* one hostname can have multiple IP addresses in DNS */
-    for (n = 0, i = 0; i < us->servers->nelts; i++) {
-        for (j = 0; j < server[i].naddrs; j++, n++) {
+    for (i = 0; i < us->servers->nelts; i++) {
+        for (j = 0; j < server[i].naddrs; j++) {
             if (server[i].backup)
                 continue;
             peers->peer[n].sockaddr = server[i].addrs[j].sockaddr;
@@ -169,6 +177,7 @@ ngx_http_upstream_init_hash(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
                 peers->peer[n].health_index = health_index;
             }
 #endif
+            n++;
         }
     }
 
@@ -225,6 +234,9 @@ ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
 
     /* In case this one is marked down */
     ngx_http_upstream_hash_next_peer(uhpd, &r->upstream->peer.tries, r->connection->log);
+    if ((ngx_int_t)r->upstream->peer.tries == -1) {
+        return NGX_ERROR;
+    }
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
             "upstream_hash: Starting with %ui", uhpd->hash % uhpd->peers->number);
