@@ -21,7 +21,8 @@ function assert_equal($one, $two, $name)
 $memcache = new Memcache;
 
 for ($i=0; $i<20; $i++) {
-    $memcache->addServer("localhost", 11211 + $i);
+	$memcache->connect("localhost", 11211 + $i);
+
 }
 
 $test_vals = array(
@@ -46,10 +47,30 @@ $curl = curl_init();
 curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
 
 foreach ($test_vals as $k => $v ) {
-    assert_equal($memcache->set("/$k", $v), TRUE, "Setting key \"$k\" via PECL");
+	assert_equal(TRUE, $memcache->set("/$k", $v), "Setting key \"$k\" via PECL");
+
     $memcache_url = rawurlencode($k);
     curl_setopt($curl, CURLOPT_URL, "$base_url$memcache_url");
-    assert_equal($v, curl_exec($curl), "Fetching key \"$k\" via Nginx");
+	assert_equal($v, curl_exec($curl), "Fetching key \"$k\" via Nginx");
+}
+
+$test_vals = array(
+	't1'	=> 200,
+	't2'	=> 200,
+	't3'	=> 200,
+	't4'	=> 500,
+	't5'	=> 200,
+	't6'	=> 200,
+	't7'	=> 200,
+);
+
+foreach ($test_vals as $location => $status) {
+	curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+	curl_setopt($curl, CURLOPT_URL, "$base_url/$location/");
+	curl_exec($curl);
+
+	assert_equal($status, curl_getinfo($curl, CURLINFO_HTTP_CODE),
+												"HTTP status for $location");
 }
 
 curl_close($curl);
