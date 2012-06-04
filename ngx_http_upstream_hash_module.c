@@ -42,9 +42,8 @@ typedef struct {
     ngx_str_t                         current_key;
     ngx_str_t                         original_key;
     ngx_uint_t                        try_i;
-    uintptr_t                         tried[1];
+    uintptr_t                         unavailable[1];
 } ngx_http_upstream_hash_peer_data_t;
-
 
 static void ngx_http_upstream_hash_next_peer(ngx_http_upstream_hash_peer_data_t *uhpd,
         ngx_uint_t *tries, ngx_log_t *log);
@@ -213,7 +212,7 @@ ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
 
     r->upstream->peer.free = ngx_http_upstream_free_hash_peer;
     r->upstream->peer.get = ngx_http_upstream_get_hash_peer;
-    r->upstream->peer.tries = us->retries + 1;
+    r->upstream->peer.tries = uhpd->peers->number;
 #if (NGX_HTTP_SSL)
     r->upstream->peer.set_session = ngx_http_upstream_set_hash_peer_session;
     r->upstream->peer.save_session = ngx_http_upstream_save_hash_peer_session;
@@ -234,13 +233,12 @@ ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
 
     /* In case this one is marked down */
     ngx_http_upstream_hash_next_peer(uhpd, &r->upstream->peer.tries, r->connection->log);
-    if ((ngx_int_t)r->upstream->peer.tries == -1) {
+    if (!r->upstream->peer.tries) {
         return NGX_ERROR;
     }
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
             "upstream_hash: Starting with %ui", uhpd->hash % uhpd->peers->number);
-
 
     return NGX_OK;
 }
@@ -262,7 +260,6 @@ ngx_http_upstream_get_hash_peer(ngx_peer_connection_t *pc, void *data)
     peer_index = uhpd->hash % uhpd->peers->number;
 
     peer = &uhpd->peers->peer[peer_index];
-
 
     ngx_log_debug3(NGX_LOG_DEBUG_HTTP, pc->log, 0,
                    "upstream_hash: chose peer %ui w/ hash %ui for tries %ui", peer_index, uhpd->hash, pc->tries);
@@ -289,7 +286,10 @@ ngx_http_upstream_free_hash_peer(ngx_peer_connection_t *pc, void *data,
             && pc->tries) {
         current = uhpd->hash % uhpd->peers->number;
 
-        uhpd->tried[ngx_bitvector_index(current)] |= ngx_bitvector_bit(current);
+        uhpd->unavailable[ngx_bitvector_index(current)] |=
+                                                    ngx_bitvector_bit(current);
+        pc->tries--;
+
         ngx_http_upstream_hash_next_peer(uhpd, &pc->tries, pc->log);
         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
           "upstream_hash: Using %ui because %ui failed", uhpd->hash % uhpd->peers->number, current);
@@ -371,26 +371,54 @@ ngx_http_upstream_save_hash_peer_session(ngx_peer_connection_t *pc, void *data) 
 
 static void ngx_http_upstream_hash_next_peer(ngx_http_upstream_hash_peer_data_t *uhpd,
         ngx_uint_t *tries, ngx_log_t *log) {
-
     ngx_uint_t current;
     current = uhpd->hash % uhpd->peers->number;
-    //  Loop while there is a try left, we're on one we haven't tried, and
-    // the current peer isn't marked down
-    while ((*tries)-- && (
-       (uhpd->tried[ngx_bitvector_index(current)] & ngx_bitvector_bit(current))
-        || uhpd->peers->peer[current].down
+
+    ngx_log_debug3(NGX_LOG_DEBUG_HTTP, log, 0,
+                "upstream_hash current %ui down %ui tries %ui",
+                current, uhpd->peers->peer[current].down, *tries);
+
+    while (*tries > 0) {
+        int unavailable = uhpd->unavailable[ngx_bitvector_index(current)] &
+                                                    ngx_bitvector_bit(current);
+
+        /* if not already marked unavailable check if it should be marked */
+        if (!unavailable) {
+            /* checks if this peer should be marked unavailable */
+            if (uhpd->peers->peer[current].down
 #if (NGX_HTTP_HEALTHCHECK)
-        || ngx_http_healthcheck_is_down(uhpd->peers->peer[current].health_index, log)
+                || ngx_http_healthcheck_is_down(
+                                uhpd->peers->peer[current].health_index, log)
 #endif
-        )) {
-       uhpd->current_key.len = ngx_sprintf(uhpd->current_key.data, "%d%V",
-           ++uhpd->try_i, &uhpd->original_key) - uhpd->current_key.data;
-       uhpd->hash += ngx_http_upstream_hash_crc32(uhpd->current_key.data,
-           uhpd->current_key.len);
-       current = uhpd->hash % uhpd->peers->number;
-       ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
-           "upstream_hash: hashed \"%V\" to %ui", &uhpd->current_key, current);
-   } 
+               ) {
+                /* add to unavailable, decrement tries */
+                uhpd->unavailable[ngx_bitvector_index(current)] |=
+                                                    ngx_bitvector_bit(current);
+                (*tries)--;
+
+                /*
+                 * continue here because the tries may now be zero in which
+                 * case the loop must exit
+                 */
+                continue;
+            }
+
+            /* not unavailable, we've found a possibly available upstream */
+            break;
+        }
+
+        /* current is unavailable, generate a new hash */
+        uhpd->current_key.len = ngx_sprintf(uhpd->current_key.data, "%d%V",
+                   ++uhpd->try_i, &uhpd->original_key) - uhpd->current_key.data;
+        uhpd->hash += ngx_http_upstream_hash_crc32(uhpd->current_key.data,
+                                                       uhpd->current_key.len);
+        current = uhpd->hash % uhpd->peers->number;
+
+        ngx_log_debug4(NGX_LOG_DEBUG_HTTP, log, 0,
+                       "upstream_hash: hashed \"%V\" to %ui down %ui tries %ui",
+                           &uhpd->current_key, current,
+                           uhpd->peers->peer[current].down, *tries);
+    }
 }
 
 /* bit-shift, bit-mask, and non-zero requirement are for libmemcache compatibility */
