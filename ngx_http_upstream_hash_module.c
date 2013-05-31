@@ -323,7 +323,7 @@ ngx_http_upstream_free_hash_peer(ngx_peer_connection_t *pc, void *data,
             "upstream_hash: free upstream hash peer try %ui", pc->tries);
 
     if (state & (NGX_PEER_FAILED|NGX_PEER_NEXT)
-            && pc->tries) {
+            && (ngx_int_t) pc->tries > 0) {
         current = ngx_http_upstream_get_hash_peer_index(uhpd);
 
         uhpd->tried[ngx_bitvector_index(current)] |= ngx_bitvector_bit(current);
