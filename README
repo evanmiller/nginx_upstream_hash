@@ -3,7 +3,6 @@
 Installation:
 
     cd nginx-0.7.62 # or whatever
-    patch -p0 < /path/to/this/directory/nginx.patch
     ./configure --add-module=/path/to/this/directory
     make
     make install
