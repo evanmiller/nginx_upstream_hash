@@ -46,7 +46,7 @@ $curl = curl_init();
 curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
 
 foreach ($test_vals as $k => $v ) {
-    assert_equal($memcache->set("/$k", $v), TRUE, "Setting key \"$k\" via PECL");
+    assert_equal(TRUE, $memcache->set("/$k", $v), "Setting key \"$k\" via PECL");
     $memcache_url = rawurlencode($k);
     curl_setopt($curl, CURLOPT_URL, "$base_url$memcache_url");
     assert_equal($v, curl_exec($curl), "Fetching key \"$k\" via Nginx");
