@@ -18,6 +18,14 @@
 #define ngx_bitvector_index(index) (index / (8 * sizeof(uintptr_t)))
 #define ngx_bitvector_bit(index) ((uintptr_t) 1 << (index % (8 * sizeof(uintptr_t))))
 
+
+typedef struct {
+    ngx_array_t  *values;
+    ngx_array_t  *lengths;
+    ngx_uint_t    retries;
+} ngx_http_upstream_hash_conf_t;
+
+
 typedef struct {
     struct sockaddr                *sockaddr;
     socklen_t                       socklen;
@@ -72,6 +80,8 @@ static char *ngx_http_upstream_hash_again(ngx_conf_t *cf, ngx_command_t *cmd,
 static ngx_int_t ngx_http_upstream_init_hash(ngx_conf_t *cf,
     ngx_http_upstream_srv_conf_t *us);
 static ngx_uint_t ngx_http_upstream_hash_crc32(u_char *keydata, size_t keylen);
+static void *ngx_http_upstream_hash_create_conf(ngx_conf_t *cf);
+
 
 static ngx_command_t  ngx_http_upstream_hash_commands[] = {
     { ngx_string("hash"),
@@ -99,7 +109,7 @@ static ngx_http_module_t  ngx_http_upstream_hash_module_ctx = {
     NULL,                                  /* create main configuration */
     NULL,                                  /* init main configuration */
 
-    NULL,                                  /* create server configuration */
+    ngx_http_upstream_hash_create_conf,    /* create server configuration */
     NULL,                                  /* merge server configuration */
 
     NULL,                                  /* create location configuration */
@@ -227,10 +237,13 @@ ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
     ngx_http_upstream_srv_conf_t *us)
 {
     ngx_http_upstream_hash_peer_data_t     *uhpd;
+    ngx_http_upstream_hash_conf_t          *uhcf;
 
     ngx_str_t val;
 
-    if (ngx_http_script_run(r, &val, us->lengths, 0, us->values) == NULL) {
+    uhcf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_hash_module);
+
+    if (ngx_http_script_run(r, &val, uhcf->lengths, 0, uhcf->values) == NULL) {
         return NGX_ERROR;
     }
 
@@ -248,7 +261,7 @@ ngx_http_upstream_init_hash_peer(ngx_http_request_t *r,
 
     r->upstream->peer.free = ngx_http_upstream_free_hash_peer;
     r->upstream->peer.get = ngx_http_upstream_get_hash_peer;
-    r->upstream->peer.tries = us->retries + 1;
+    r->upstream->peer.tries = uhcf->retries + 1;
 #if (NGX_HTTP_SSL)
     r->upstream->peer.set_session = ngx_http_upstream_set_hash_peer_session;
     r->upstream->peer.save_session = ngx_http_upstream_save_hash_peer_session;
@@ -442,10 +455,11 @@ ngx_http_upstream_hash_crc32(u_char *keydata, size_t keylen)
 static char *
 ngx_http_upstream_hash(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_upstream_srv_conf_t  *uscf;
-    ngx_http_script_compile_t      sc;
-    ngx_str_t                     *value;
-    ngx_array_t                   *vars_lengths, *vars_values;
+    ngx_http_upstream_srv_conf_t   *uscf;
+    ngx_http_script_compile_t       sc;
+    ngx_str_t                      *value;
+    ngx_array_t                    *vars_lengths, *vars_values;
+    ngx_http_upstream_hash_conf_t  *uhcf;
 
     value = cf->args->elts;
 
@@ -473,19 +487,44 @@ ngx_http_upstream_hash(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                   |NGX_HTTP_UPSTREAM_WEIGHT
                   |NGX_HTTP_UPSTREAM_DOWN;
 
-    uscf->values = vars_values->elts;
-    uscf->lengths = vars_lengths->elts;
+    uhcf = ngx_http_conf_upstream_srv_conf(uscf, ngx_http_upstream_hash_module);
+
+    uhcf->values = vars_values->elts;
+    uhcf->lengths = vars_lengths->elts;
 
     return NGX_CONF_OK;
 }
 
+
+static void *
+ngx_http_upstream_hash_create_conf(ngx_conf_t *cf)
+{
+    ngx_http_upstream_hash_conf_t  *conf;
+
+    conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_upstream_hash_conf_t));
+    if (conf == NULL) {
+        return NULL;
+    }
+
+    /*
+     * set by ngx_pcalloc():
+     *     conf->lengths;
+     *     conf->values = NULL;
+     */
+
+    conf->retries = 0;
+
+    return conf;
+}
+
+
 static char *
 ngx_http_upstream_hash_again(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_upstream_srv_conf_t  *uscf;
-    ngx_int_t n;
-
-    ngx_str_t *value;
+    ngx_http_upstream_srv_conf_t   *uscf;
+    ngx_http_upstream_hash_conf_t  *uhcf;
+    ngx_int_t                       n;
+    ngx_str_t                      *value;
 
     uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
 
@@ -497,7 +536,8 @@ ngx_http_upstream_hash_again(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return "invalid number";
     }
 
-    uscf->retries = n;
+    uhcf = ngx_http_conf_upstream_srv_conf(uscf, ngx_http_upstream_hash_module);
+    uhcf->retries = n;
 
     return NGX_CONF_OK;
 }
