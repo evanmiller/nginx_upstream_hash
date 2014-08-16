@@ -1,6 +1,8 @@
-= NOTE: This module is obsolete as of Nginx 1.7.2, which includes the [hash](http://nginx.org/r/hash) directive. This repository remains for historical interest only. =
+NOTE: This module is obsolete as of Nginx 1.7.2, which includes the [hash](http://nginx.org/r/hash) directive. This repository remains for historical interest only. =
+==
 
-== ngx_http_upstream_hash_module ==
+ngx_http_upstream_hash_module
+--
 
 Installation:
 
